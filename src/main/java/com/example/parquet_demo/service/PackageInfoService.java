@@ -1,11 +1,6 @@
 package com.example.parquet_demo.service;
 
 import com.example.parquet_demo.model.PackageInfo;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.Path;
-import org.apache.parquet.example.data.Group;
-import org.apache.parquet.hadoop.ParquetReader;
-import org.apache.parquet.hadoop.example.GroupReadSupport;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
@@ -15,6 +10,10 @@ import java.net.URI;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -25,43 +24,48 @@ public class PackageInfoService {
     @PostConstruct
     public void init() {
         try {
+            // Locate the Parquet file from the classpath
             URL resourceUrl = getClass().getClassLoader().getResource("package_metadata.parquet");
             if (resourceUrl == null) {
                 throw new IllegalStateException("Resource package_metadata.parquet not found in classpath.");
             }
             URI resourceURI = resourceUrl.toURI();
-            Path parquetPath;
+            File parquetFile;
             if ("jar".equals(resourceURI.getScheme())) {
-                // If the resource is inside a jar, copy it to a temporary file.
+                // Resource is packaged inside a jar: copy to a temporary file
                 try (InputStream is = getClass().getClassLoader().getResourceAsStream("package_metadata.parquet")) {
                     if (is == null) {
                         throw new IllegalStateException("Could not open resource stream for package_metadata.parquet");
                     }
-                    File tempFile = File.createTempFile("package_metadata", ".parquet");
-                    tempFile.deleteOnExit();
-                    Files.copy(is, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                    parquetPath = new Path(tempFile.getAbsolutePath());
+                    parquetFile = File.createTempFile("package_metadata", ".parquet");
+                    parquetFile.deleteOnExit();
+                    Files.copy(is, parquetFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 }
             } else {
                 // Resource is directly available on the filesystem
-                parquetPath = new Path(resourceURI);
+                parquetFile = new File(resourceURI);
             }
+            String parquetFilePath = parquetFile.getAbsolutePath();
 
-            Configuration conf = new Configuration();
-            ParquetReader<Group> reader = ParquetReader.builder(new GroupReadSupport(), parquetPath)
-                    .withConf(conf)
-                    .build();
-            Group group;
-            while ((group = reader.read()) != null) {
-                PackageInfo info = new PackageInfo();
-                info.setPackageManager(group.getString("package_manager", 0));
-                info.setPackageName(group.getString("package_name", 0));
-                info.setPackageVersion(group.getString("package_version", 0));
-                info.setSpdxLicenseId(group.getString("spdx_license_id", 0));
-                info.setMetadataSource(group.getString("metadata_source", 0));
-                packages.add(info);
+            // Load DuckDB driver and create a connection (in-memory database)
+            Class.forName("org.duckdb.DuckDBDriver");
+            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:")) {
+                // Construct and execute SQL query using DuckDB's read_parquet function
+                String sql = "SELECT package_manager, package_name, package_version, spdx_license_id, metadata_source " +
+                        "FROM read_parquet('" + parquetFilePath.replace("\\", "\\\\") + "')";
+                try (Statement stmt = conn.createStatement();
+                     ResultSet rs = stmt.executeQuery(sql)) {
+                    while (rs.next()) {
+                        PackageInfo info = new PackageInfo();
+                        info.setPackageManager(rs.getString("package_manager"));
+                        info.setPackageName(rs.getString("package_name"));
+                        info.setPackageVersion(rs.getString("package_version"));
+                        info.setSpdxLicenseId(rs.getString("spdx_license_id"));
+                        info.setMetadataSource(rs.getString("metadata_source"));
+                        packages.add(info);
+                    }
+                }
             }
-            reader.close();
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -78,5 +82,3 @@ public class PackageInfoService {
                 .orElse(null);
     }
 }
-
-
